@@ -8,12 +8,12 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import io
 
-# --- Configuración del Robot ---
+# --- Configuracion del Robot ---
 ESP32_CAM_IP = "192.168.196.182"  # ¡¡¡CAMBIA ESTO POR LA IP DE TU ESP32-CAM!!!
 STREAM_URL = f"http://{ESP32_CAM_IP}/stream"
 AUTO_MODE_URL = f"http://{ESP32_CAM_IP}/auto"
 STOP_URL = f"http://{ESP32_CAM_IP}/stop"
-MOVE_URL = f"http://{ESP32_CAM_IP}/move" # Mantener para comandos manuales, aunque el robot decide en auto
+MOVE_URL = f"http://{ESP32_CAM_IP}/move"
 
 # --- Variables Globales para la Interfaz y Control ---
 root = None
@@ -23,301 +23,297 @@ status_label = None
 mode_status_label = None
 auto_mode_var = False
 stop_stream_flag = threading.Event() # Evento para detener el hilo del stream
-auto_mode_button = None # Añadimos esta declaración global
-stop_button = None # Añadimos esta declaración global
+auto_mode_button = None
+stop_button = None
 
-# --- Parámetros de Procesamiento de Visión en PC (solo para visualización) ---
-THRESHOLD_VAL = 80 # Debe coincidir con el del ESP32 para una representación precisa
-ROI_HEIGHT = 60    # Debe coincidir con el del ESP32
-ROWS_TO_ANALYZE = 15 # Debe coincidir con el del ESP32
+# --- Parametros de Procesamiento de Vision en PC (solo para visualizacion) ---
+THRESHOLD_VAL = 80 # Debe coincidir con el del ESP32 para una representacion precisa
+ROI_HEIGHT = 60    # Debe coincidir con el del ESP32 para una representacion precisa
 
-# --- Funciones de Comunicación con el Robot ---
+# --- Funciones de Control del Robot ---
 
-def send_auto_mode(enable):
-    """Envía el comando para activar/desactivar el modo automático."""
-    global auto_mode_var
+def send_command(url, params=None):
+    """Envio generico de comandos HTTP GET al ESP32."""
     try:
-        data = {"auto": enable}
-        response = requests.post(AUTO_MODE_URL, json=data, timeout=2)
-        if response.status_code == 200:
-            auto_mode_var = enable
-            update_status("Modo automático: " + ("ACTIVADO" if enable else "DESACTIVADO"))
-            update_mode_status()
-        else:
-            update_status(f"Error al cambiar modo auto: {response.status_code}")
+        response = requests.get(url, params=params, timeout=5)
+        response.raise_for_status() # Lanza un error para codigos de estado HTTP malos
+        print(f"Comando enviado a {url} con parametros {params}: {response.text}")
+        return response.text
+    except requests.exceptions.ConnectionError:
+        messagebox.showerror("Error de Conexión", f"No se pudo conectar al ESP32-CAM en {ESP32_CAM_IP}. Verifica la IP y la conexion Wi-Fi.")
+        print(f"ERROR: No se pudo conectar a {ESP32_CAM_IP}")
+        return None
+    except requests.exceptions.Timeout:
+        messagebox.showerror("Error de Tiempo de Espera", "La solicitud al ESP32-CAM ha excedido el tiempo de espera.")
+        print(f"ERROR: Tiempo de espera excedido al conectar a {ESP32_CAM_IP}")
+        return None
     except requests.exceptions.RequestException as e:
-        update_status(f"Error de conexión al cambiar modo: {e}")
+        messagebox.showerror("Error de Solicitud", f"Error al enviar el comando al ESP32-CAM: {e}")
+        print(f"ERROR: Error de solicitud HTTP: {e}")
+        return None
+
+def send_manual_move_command(command):
+    """Envia un comando de movimiento manual al ESP32."""
+    global auto_mode_var
+    if auto_mode_var and command != "stop":
+        messagebox.showinfo("Modo Automatico Activo", "No se pueden enviar comandos manuales mientras el robot esta en modo automatico. Desactiva el modo automatico primero o usa el boton STOP.")
+        return
+
+    response_text = send_command(MOVE_URL, params={"command": command})
+    if response_text:
+        # Actualizar el estado del robot en la GUI
+        update_status_labels(f"Movimiento: {command.replace('_', ' ').capitalize()}", "Manual" if not auto_mode_var else "Automatico")
+        if command == "stop":
+             update_status_labels("Detenido", "Manual" if not auto_mode_var else "Automatico")
+
+
+def toggle_auto_mode():
+    """Alterna el modo automatico/manual del robot."""
+    global auto_mode_var
+    new_state = not auto_mode_var
+    enable_param = "true" if new_state else "false"
+    response_text = send_command(AUTO_MODE_URL, params={"enable": enable_param})
+
+    if response_text:
+        auto_mode_var = new_state
+        if auto_mode_var:
+            auto_mode_button.config(text="Desactivar Modo Automatico", style="Red.TButton")
+            update_status_labels("Movimiento Automatico", "Automatico")
+        else:
+            auto_mode_button.config(text="Activar Modo Automatico", style="Green.TButton")
+            update_status_labels("Detenido", "Manual")
+        print(f"Modo Automatico: {'Activado' if auto_mode_var else 'Desactivado'}")
 
 def send_stop_command():
-    """Envía el comando de detener al robot."""
-    try:
-        response = requests.post(STOP_URL, timeout=2)
-        if response.status_code == 200:
-            update_status("Comando de STOP enviado.")
-            # Asegurarse de que el botón de auto refleje el estado real
-            send_auto_mode(False) 
-        else:
-            update_status(f"Error al enviar STOP: {response.status_code}")
-    except requests.exceptions.RequestException as e:
-        update_status(f"Error de conexión al enviar STOP: {e}")
+    """Envia el comando de detener al robot."""
+    global auto_mode_var
+    response_text = send_command(STOP_URL)
+    if response_text:
+        auto_mode_var = False # Al detener, siempre vuelve a manual
+        auto_mode_button.config(text="Activar Modo Automatico", style="Green.TButton")
+        update_status_labels("Detenido", "Manual")
+        print("Comando STOP enviado.")
 
-def send_manual_move_command(direction, speed=150):
-    """Envía un comando de movimiento manual. (Sólo si el robot no está en modo auto)"""
-    if auto_mode_var:
-        update_status("Robot en modo automático. No se puede mover manualmente.")
-        return
-    try:
-        data = {"direction": direction, "speed": speed}
-        response = requests.post(MOVE_URL, json=data, timeout=1)
-        if response.status_code == 200:
-            update_status(f"Movimiento manual: {direction} (velocidad: {speed})")
-        else:
-            update_status(f"Error al enviar movimiento: {response.status_code}")
-    except requests.exceptions.RequestException as e:
-        update_status(f"Error de conexión al enviar movimiento: {e}")
+# --- Funciones de Procesamiento de Video ---
 
-# --- Funciones de Procesamiento de Visión en PC para Visualización ---
-
-def process_frame_for_display(frame):
+def process_frame(frame):
     """
-    Procesa un frame gris para binarización y detección de línea (solo para visualización).
-    Dibuja la línea detectada en el frame binario.
+    Procesa un frame para deteccion de lineas (ejemplo simplificado).
+    Returns: frame binarizado y frame con deteccion.
     """
-    if frame is None:
-        return None, None
+    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
 
-    # El stream de la ESP32-CAM ahora es en escala de grises
-    gray_frame = frame 
-    height, width = gray_frame.shape[:2]
+    # Definir la Region de Interes (ROI) en la parte inferior de la imagen
+    h, w = gray.shape
+    roi_start_y = h - ROI_HEIGHT
+    roi = gray[roi_start_y:h, 0:w]
 
-    # Binarización (debe coincidir con el umbral del ESP32)
-    _, binary_frame = cv2.threshold(gray_frame, THRESHOLD_VAL, 255, cv2.THRESH_BINARY)
-    
-    # Crear una copia para dibujar sin modificar el original
-    binary_display = cv2.cvtColor(binary_frame, cv2.COLOR_GRAY2BGR) # Convertir a BGR para dibujar colores
+    # Binarizar la ROI
+    _, binary_roi = cv2.threshold(roi, THRESHOLD_VAL, 255, cv2.THRESH_BINARY)
 
-    # Definir ROI (debe coincidir con el del ESP32)
-    roi_start_y = height - ROI_HEIGHT
-    if roi_start_y < 0: roi_start_y = 0
+    # Encontrar contornos en la ROI binarizada (simplificado para deteccion visual)
+    contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Extraer la ROI principal
-    roi_main = binary_frame[roi_start_y:height, 0:width]
+    binary_full_frame = np.zeros_like(gray)
+    binary_full_frame[roi_start_y:h, 0:w] = binary_roi # Poner la ROI binarizada en un frame completo
 
-    line_pixels_x_sum = 0
-    line_pixels_count = 0
+    display_frame = frame.copy() # Copia para dibujar sobre ella
 
-    # Analiza las últimas filas de la ROI (más cercanas al robot)
-    current_roi_height = roi_main.shape[0]
-    for y_offset in range(current_roi_height - min(ROWS_TO_ANALYZE, current_roi_height), current_roi_height):
-        for x in range(width):
-            if roi_main[y_offset, x] > 0: # Si es un píxel blanco (línea)
-                line_pixels_x_sum += x
-                line_pixels_count += 1
+    # Dibujar la ROI en el frame original para visualizacion
+    cv2.rectangle(display_frame, (0, roi_start_y), (w-1, h-1), (0, 255, 0), 2)
 
-    line_center_x = -1 # Valor por defecto si no se detecta línea
-    if line_pixels_count > (width * min(ROWS_TO_ANALYZE, current_roi_height) * 0.02): # Mínimo 2% de píxeles
-        line_center_x = int(line_pixels_x_sum / line_pixels_count)
-        # Dibujar el centro de la línea en la imagen binarizada para depuración
-        center_y_draw = int(roi_start_y + current_roi_height / 2) # Dibuja en el centro de la ROI
-        cv2.line(binary_display, (line_center_x, roi_start_y), (line_center_x, height), (0, 255, 0), 2) # Línea verde
+    if contours:
+        # Encontrar el contorno mas grande (asumiendo que es la linea principal)
+        largest_contour = max(contours, key=cv2.contourArea)
+        M = cv2.moments(largest_contour)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"]) + roi_start_y # Ajustar Y a coordenadas del frame completo
 
-    # Dibujar el rectángulo de la ROI principal
-    cv2.rectangle(binary_display, (0, roi_start_y), (width - 1, height - 1), (0, 0, 255), 1) # Línea roja para ROI
+            # Dibujar el centroide
+            cv2.circle(display_frame, (cx, cy), 5, (255, 0, 0), -1)
+            cv2.putText(display_frame, f"Centro: ({cx},{cy})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,0,0), 2)
 
-    return gray_frame, binary_display
+    # Convertir los frames a formato RGB para PIL
+    display_frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB) # Asegurar que es RGB
+    binary_full_frame_rgb = cv2.cvtColor(binary_full_frame, cv2.COLOR_GRAY2RGB)
 
-# --- Funciones de la Interfaz Gráfica (Tkinter) ---
+    return display_frame_rgb, binary_full_frame_rgb
 
-def update_status(message):
-    """Actualiza el mensaje de estado en la interfaz."""
-    if status_label:
-        status_label.config(text=f"Estado: {message}")
+def stream_video():
+    """Hilo para recibir y mostrar el stream de video."""
+    print("Iniciando stream de video...")
+    while not stop_stream_flag.is_set():
+        try:
+            # Usar stream=True para mantener la conexion abierta y leer chunks
+            with requests.get(STREAM_URL, stream=True, timeout=10) as r:
+                r.raise_for_status()
+                bytes_data = b''
+                for chunk in r.iter_content(chunk_size=1024):
+                    if stop_stream_flag.is_set():
+                        break
+                    bytes_data += chunk
+                    a = bytes_data.find(b'\xff\xd8') # JPEG start
+                    b = bytes_data.find(b'\xff\xd9') # JPEG end
+                    if a != -1 and b != -1:
+                        jpg = bytes_data[a:b+2]
+                        bytes_data = bytes_data[b+2:]
+                        try:
+                            # Decodificar JPEG
+                            img = Image.open(io.BytesIO(jpg))
+                            img_np = np.array(img) # Convertir a NumPy array
 
-def update_mode_status():
-    """Actualiza el estado del modo (automático/manual) en la interfaz."""
-    if mode_status_label:
-        mode_status_label.config(text=f"Modo: {'Automático (IA)' if auto_mode_var else 'Manual'}")
-    
-    # Actualizar el estilo del botón de modo automático
-    if auto_mode_button:
-        if auto_mode_var:
-            auto_mode_button.config(text="Desactivar IA", style="Red.TButton")
-        else:
-            auto_mode_button.config(text="Activar IA", style="Green.TButton")
+                            # Procesar el frame
+                            processed_original, processed_binary = process_frame(img_np)
 
+                            # Redimensionar para la visualizacion
+                            # Asumiendo que video_label y binary_label tienen un tamano
+                            if video_label.winfo_width() > 0:
+                                max_width = video_label.winfo_width()
+                                max_height = video_label.winfo_height()
+                                if max_width > 0 and max_height > 0:
+                                    # Para mantener la proporcion de aspecto
+                                    h, w, _ = processed_original.shape
+                                    ratio = min(max_width / w, max_height / h)
+                                    new_w = int(w * ratio)
+                                    new_h = int(h * ratio)
 
-def video_stream_thread():
-    """Hilo para capturar y procesar el stream de video del ESP32-CAM."""
-    global video_label, binary_label
+                                    img_original_resized = Image.fromarray(processed_original).resize((new_w, new_h), Image.LANCZOS)
+                                    img_binary_resized = Image.fromarray(processed_binary).resize((new_w, new_h), Image.LANCZOS)
 
-    try:
-        # Aumentar timeout para la conexión inicial si es necesario
-        response = requests.get(STREAM_URL, stream=True, timeout=10) 
-        if response.status_code != 200:
-            update_status(f"Error al iniciar stream: {response.status_code}")
-            return
+                                    photo_original = ImageTk.PhotoImage(image=img_original_resized)
+                                    photo_binary = ImageTk.PhotoImage(image=img_binary_resized)
 
-        bytes_buffer = b''
-        for chunk in response.iter_content(chunk_size=1024):
-            if stop_stream_flag.is_set():
-                break
+                                    video_label.config(image=photo_original)
+                                    video_label.image = photo_original
+                                    binary_label.config(image=photo_binary)
+                                    binary_label.image = photo_binary
+                        except Exception as e:
+                            print(f"Error procesando/mostrando frame: {e}")
+        except requests.exceptions.ConnectionError:
+            print(f"Conexion perdida con {ESP32_CAM_IP}. Reintentando en 3 segundos...")
+            time.sleep(3)
+        except requests.exceptions.RequestException as e:
+            print(f"Error de stream: {e}. Reintentando en 3 segundos...")
+            time.sleep(3)
+        except Exception as e:
+            print(f"Error inesperado en stream: {e}")
+            time.sleep(1) # Pequeña pausa para evitar bucle apretado en caso de errores rapidos
+    print("Stream de video detenido.")
 
-            bytes_buffer += chunk
-            a = bytes_buffer.find(b'\xff\xd8') # JPEG start
-            b = bytes_buffer.find(b'\xff\xd9') # JPEG end
-            if a != -1 and b != -1:
-                jpg = bytes_buffer[a:b+2]
-                bytes_buffer = bytes_buffer[b+2:]
-                
-                try:
-                    # Convertir bytes a imagen OpenCV
-                    img_np = np.frombuffer(jpg, dtype=np.uint8)
-                    frame = cv2.imdecode(img_np, cv2.IMREAD_GRAYSCALE) # Leer directamente como GRIS
-
-                    if frame is not None:
-                        # Procesar para visualización
-                        gray_frame_display, binary_frame_display = process_frame_for_display(frame)
-
-                        # Mostrar frame original (gris)
-                        img_rgb = Image.fromarray(gray_frame_display)
-                        img_tk = ImageTk.PhotoImage(image=img_rgb)
-                        video_label.imgtk = img_tk
-                        video_label.config(image=img_tk)
-
-                        # Mostrar frame binarizado con detección de línea
-                        img_binary_rgb = Image.fromarray(binary_frame_display)
-                        img_binary_tk = ImageTk.PhotoImage(image=img_binary_rgb)
-                        binary_label.imgtk = img_binary_tk
-                        binary_label.config(image=img_binary_tk)
-
-                except Exception as e:
-                    print(f"Error al procesar frame: {e}")
-
-    except requests.exceptions.RequestException as e:
-        update_status(f"Error de conexión con el stream: {e}")
-    finally:
-        update_status("Stream detenido.")
-        print("Hilo de stream terminado.")
-
-def start_stream():
-    """Inicia el hilo del stream de video."""
-    stop_stream_flag.clear()
-    threading.Thread(target=video_stream_thread, daemon=True).start()
-    update_status("Iniciando stream...")
-
-def stop_all():
-    """Detiene el stream y envía el comando de STOP al robot."""
-    stop_stream_flag.set()
-    send_stop_command()
 
 def on_closing():
-    """Maneja el cierre de la ventana de la interfaz."""
-    if messagebox.askokcancel("Salir", "¿Estás seguro de que quieres salir y detener todo?"):
-        stop_all() # Detener el stream y el robot
-        root.destroy()
+    """Funcion que se llama al cerrar la ventana de Tkinter."""
+    print("Cerrando aplicacion...")
+    stop_stream_flag.set() # Establece la bandera para detener el hilo del stream
+    send_stop_command() # Asegurarse de que el robot se detenga al cerrar la app
+    root.quit()
+    root.destroy()
 
-# --- Configuración de la Interfaz Gráfica ---
+def update_status_labels(robot_status, mode_status):
+    """Actualiza las etiquetas de estado del robot y del modo."""
+    status_label.config(text=f"Estado del Robot: {robot_status}")
+    mode_status_label.config(text=f"Modo: {mode_status}")
 
-def setup_gui():
-    """Configura la ventana principal de la interfaz gráfica."""
+
+# --- Interfaz de Usuario (Tkinter) ---
+def create_gui():
+    """Crea y configura la interfaz grafica."""
     global root, video_label, binary_label, status_label, mode_status_label, auto_mode_button, stop_button
 
     root = tk.Tk()
-    root.title("Control Robot Omnidireccional - ESP32-CAM")
-    root.geometry("1000x700") # Aumentar el tamaño para más espacio
+    root.title("Control Robot ESP32-CAM")
+    root.geometry("1000x800") # Aumentar un poco el tamano inicial
 
-    # *** CONFIGURE STYLES FOR TTK BUTTONS ***
+    # Estilos para los botones
     style = ttk.Style()
-    
-    # Configure a style for the green button
-    style.configure("Green.TButton", background="green", foreground="white", font=("Arial", 10, "bold"))
-    style.map("Green.TButton",
-              background=[('active', 'lightgreen'), ('!disabled', 'green')],
-              foreground=[('active', 'black'), ('!disabled', 'white')])
-
-    # Configure a style for the red button
-    style.configure("Red.TButton", background="red", foreground="white", font=("Arial", 10, "bold"))
-    style.map("Red.TButton",
-              background=[('active', 'lightcoral'), ('!disabled', 'red')],
-              foreground=[('active', 'black'), ('!disabled', 'white')])
-    
-    # Configure a style for general manual control buttons (optional, but good practice)
-    style.configure("Manual.TButton", font=("Arial", 10))
-    # ****************************************
+    style.configure("TButton", padding=10, font=("Arial", 12))
+    style.configure("Green.TButton", background="#28a745", foreground="white")
+    style.map("Green.TButton", background=[("active", "#218838")])
+    style.configure("Red.TButton", background="#dc3545", foreground="white")
+    style.map("Red.TButton", background=[("active", "#c82333")])
+    style.configure("Blue.TButton", background="#007bff", foreground="white")
+    style.map("Blue.TButton", background=[("active", "#0056b3")])
 
     # Frame principal
     main_frame = ttk.Frame(root, padding="10")
     main_frame.pack(fill="both", expand=True)
 
-    # Título
-    ttk.Label(main_frame, text="Control y Visión del Robot ESP32-CAM", font=("Arial", 16, "bold")).pack(pady=10)
+    # Frame para el estado
+    status_container = ttk.LabelFrame(main_frame, text="Estado del Robot", padding="10")
+    status_container.pack(pady=10, fill="x")
 
-    # Estado y modo
-    status_frame = ttk.LabelFrame(main_frame, text="Estado del Sistema", padding="10")
-    status_frame.pack(pady=10, fill="x")
-    status_label = ttk.Label(status_frame, text="Estado: Conectando...", font=("Arial", 10))
-    status_label.pack(side="left", padx=5)
-    mode_status_label = ttk.Label(status_frame, text="Modo: Manual", font=("Arial", 10, "bold"))
-    mode_status_label.pack(side="right", padx=5)
-    
-    # Controles de Modo
-    mode_control_frame = ttk.LabelFrame(main_frame, text="Control de Modo", padding="10")
-    mode_control_frame.pack(pady=10, fill="x")
+    status_label = ttk.Label(status_container, text="Estado del Robot: Desconocido", font=("Arial", 12, "bold"))
+    status_label.pack(side="left", padx=10)
 
-    auto_mode_button = ttk.Button(mode_control_frame, text="Activar IA", command=lambda: send_auto_mode(not auto_mode_var), style="Green.TButton")
-    auto_mode_button.pack(side="left", padx=5, expand=True, fill="x")
-    
-    stop_button = ttk.Button(mode_control_frame, text="DETENER TODO", command=stop_all, style="Red.TButton")
-    stop_button.pack(side="left", padx=5, expand=True, fill="x")
+    mode_status_label = ttk.Label(status_container, text="Modo: Desconocido", font=("Arial", 12, "bold"))
+    mode_status_label.pack(side="right", padx=10)
 
-    # Controles Manuales (deshabilitados si está en modo automático)
-    manual_control_frame = ttk.LabelFrame(main_frame, text="Control Manual (Solo en modo Manual)", padding="10")
-    manual_control_frame.pack(pady=10, fill="x")
-
-    # Uso de grid para organizar mejor los botones manuales
-    manual_control_frame.columnconfigure(0, weight=1)
-    manual_control_frame.columnconfigure(1, weight=1)
-    manual_control_frame.columnconfigure(2, weight=1)
-
-    ttk.Button(manual_control_frame, text="↑ Adelante (W)", command=lambda: send_manual_move_command("forward"), style="Manual.TButton").grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-    ttk.Button(manual_control_frame, text="← Izquierda (A)", command=lambda: send_manual_move_command("left"), style="Manual.TButton").grid(row=1, column=0, padx=5, pady=5, sticky="ew")
-    ttk.Button(manual_control_frame, text="→ Derecha (D)", command=lambda: send_manual_move_command("right"), style="Manual.TButton").grid(row=1, column=2, padx=5, pady=5, sticky="ew")
-    ttk.Button(manual_control_frame, text="↓ Atrás (S)", command=lambda: send_manual_move_command("backward"), style="Manual.TButton").grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-    ttk.Button(manual_control_frame, text="Girar Izq (Q)", command=lambda: send_manual_move_command("rotate_left"), style="Manual.TButton").grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-    ttk.Button(manual_control_frame, text="Girar Der (E)", command=lambda: send_manual_move_command("rotate_right"), style="Manual.TButton").grid(row=0, column=2, padx=5, pady=5, sticky="ew")
-    ttk.Button(manual_control_frame, text="STOP Manual (Space)", command=lambda: send_manual_move_command("stop", 0), style="Manual.TButton").grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-
-    # Frame para los videos
+    # Contenedor para los frames de video
     video_frames_container = ttk.Frame(main_frame)
     video_frames_container.pack(pady=10, fill="both", expand=True)
 
     # Frame para el video original
-    original_video_frame = ttk.LabelFrame(video_frames_container, text="Stream Original (Gris)", padding="10")
+    original_video_frame = ttk.LabelFrame(video_frames_container, text="Stream Original (Procesado)", padding="10")
     original_video_frame.pack(side="left", fill="both", expand=True, padx=5)
     video_label = tk.Label(original_video_frame)
     video_label.pack(fill="both", expand=True)
 
     # Frame para el video binarizado
-    binary_video_frame = ttk.LabelFrame(video_frames_container, text="Imagen Binarizada + Detección", padding="10")
+    binary_video_frame = ttk.LabelFrame(video_frames_container, text="Imagen Binarizada + Deteccion", padding="10")
     binary_video_frame.pack(side="right", fill="both", expand=True, padx=5)
     binary_label = tk.Label(binary_video_frame)
     binary_label.pack(fill="both", expand=True)
-    
+
+    # Frame para los controles
+    controls_frame = ttk.LabelFrame(main_frame, text="Control Manual del Robot", padding="10")
+    controls_frame.pack(pady=10, fill="x")
+
+    # Botones de control manual
+    button_font = ("Arial", 14)
+    button_width = 10
+
+    # Grid para botones de movimiento
+    grid_frame = ttk.Frame(controls_frame)
+    grid_frame.pack(pady=10)
+
+    # Fila superior (Rotar Izq, Adelante, Rotar Der)
+    ttk.Button(grid_frame, text="Rotar Izq (Q)", command=lambda: send_manual_move_command("rotate_left"), style="Blue.TButton", width=button_width).grid(row=0, column=0, padx=5, pady=5)
+    ttk.Button(grid_frame, text="Adelante (W)", command=lambda: send_manual_move_command("forward"), style="Blue.TButton", width=button_width).grid(row=0, column=1, padx=5, pady=5)
+    ttk.Button(grid_frame, text="Rotar Der (E)", command=lambda: send_manual_move_command("rotate_right"), style="Blue.TButton", width=button_width).grid(row=0, column=2, padx=5, pady=5)
+
+    # Fila central (Izquierda, STOP, Derecha)
+    ttk.Button(grid_frame, text="Izquierda (A)", command=lambda: send_manual_move_command("left"), style="Blue.TButton", width=button_width).grid(row=1, column=0, padx=5, pady=5)
+    stop_button = ttk.Button(grid_frame, text="STOP (S)", command=send_stop_command, style="Red.TButton", width=button_width)
+    stop_button.grid(row=1, column=1, padx=5, pady=5)
+    ttk.Button(grid_frame, text="Derecha (D)", command=lambda: send_manual_move_command("right"), style="Blue.TButton", width=button_width).grid(row=1, column=2, padx=5, pady=5)
+
+    # Fila inferior (Atras)
+    ttk.Button(grid_frame, text="Atras (S)", command=lambda: send_manual_move_command("backward"), style="Blue.TButton", width=button_width).grid(row=2, column=1, padx=5, pady=5)
+
+    # Boton de modo automatico
+    auto_mode_button = ttk.Button(controls_frame, text="Activar Modo Automatico", command=toggle_auto_mode, style="Green.TButton")
+    auto_mode_button.pack(pady=10)
+
     # Manejo de teclas para control manual
     root.bind("<w>", lambda event: send_manual_move_command("forward"))
     root.bind("<a>", lambda event: send_manual_move_command("left"))
-    root.bind("<s>", lambda event: send_manual_move_command("backward"))
+    root.bind("<s>", lambda event: send_manual_move_command("stop")) # 's' para detener
     root.bind("<d>", lambda event: send_manual_move_command("right"))
     root.bind("<q>", lambda event: send_manual_move_command("rotate_left"))
     root.bind("<e>", lambda event: send_manual_move_command("rotate_right"))
-    root.bind("<space>", lambda event: send_manual_move_command("stop", 0))
 
+    # Configurar el cierre de la ventana
     root.protocol("WM_DELETE_WINDOW", on_closing)
 
-    start_stream()
-    update_mode_status() # Estado inicial del modo
+    # Iniciar el hilo de video
+    video_thread = threading.Thread(target=stream_video, daemon=True)
+    video_thread.start()
+
+    # Estado inicial
+    update_status_labels("Detenido", "Manual")
 
     root.mainloop()
 
 if __name__ == "__main__":
-    setup_gui()
+    create_gui()
