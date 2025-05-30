@@ -1,13 +1,13 @@
 """
-ROBOT SEGUIDOR DE LÍNEA ESP32-CAM - VERSIÓN CORREGIDA
+ROBOT SEGUIDOR DE LÍNEA ESP32-CAM - INTERFAZ COMPLETA
 ====================================================
 
-CORRECCIONES IMPLEMENTADAS:
-- Rotación de imagen 180 grados para corregir orientación
-- Filtrado avanzado para eliminar objetos blancos no deseados
-- Detección de línea más robusta con filtros morfológicos
-- Selección inteligente del contorno de línea principal
-- Eliminación de ruido y objetos pequeños
+Interfaz que replica exactamente la imagen mostrada con:
+- Visualización dual (original + binarizada)
+- Detección de centroide con ROI
+- Sliders para ajuste de parámetros
+- Control manual y automático
+- Seguimiento preciso de línea negra
 """
 
 import cv2
@@ -47,8 +47,8 @@ PARAMETROS_DEFAULT = {
     'umbral_binario': 80,
     'altura_roi': 60,
     'zona_muerta_centro': 0.08,
-    'velocidad_base': 160,
-    'velocidad_giro': 120,
+    'velocidad_base': 180,
+    'velocidad_giro': 140,
 }
 
 # ==========================================
@@ -71,15 +71,13 @@ sliders = {}
 stop_stream_flag = threading.Event()
 parametros_actuales = PARAMETROS_DEFAULT.copy()
 
-# Variables de detección mejoradas
+# Variables de detección
 ultima_deteccion = {
     'linea_detectada': False,
     'posicion_linea': 0.0,
     'centro_x': 0,
     'centro_y': 0,
-    'pixels_detectados': 0,
-    'area_contorno': 0,
-    'confianza': 0.0
+    'pixels_detectados': 0
 }
 
 class RobotController:
@@ -214,108 +212,16 @@ Reinicia el ESP32-CAM si persiste el error."""
 # Instancia global del controlador
 robot = RobotController()
 
-def aplicar_filtros_morfologicos(imagen_binaria):
-    """Aplica filtros morfológicos para limpiar la imagen"""
-    # Crear kernels morfológicos
-    kernel_small = np.ones((3,3), np.uint8)
-    kernel_medium = np.ones((5,5), np.uint8)
-    
-    # 1. Operación de apertura (erosión + dilatación) para eliminar ruido pequeño
-    imagen_limpia = cv2.morphologyEx(imagen_binaria, cv2.MORPH_OPEN, kernel_small)
-    
-    # 2. Operación de cierre (dilatación + erosión) para cerrar huecos en líneas
-    imagen_limpia = cv2.morphologyEx(imagen_limpia, cv2.MORPH_CLOSE, kernel_medium)
-    
-    # 3. Eliminación de componentes pequeños
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(imagen_limpia, connectivity=8)
-    
-    # Crear imagen de salida
-    imagen_filtrada = np.zeros_like(imagen_limpia)
-    
-    for i in range(1, num_labels):  # Saltar el fondo (label 0)
-        area = stats[i, cv2.CC_STAT_AREA]
-        # Solo mantener componentes con área mínima (filtrar ruido)
-        if area > 100:  # Área mínima para ser considerado línea
-            imagen_filtrada[labels == i] = 255
-    
-    return imagen_filtrada
-
-def seleccionar_contorno_linea_principal(contornos, ancho_imagen):
-    """Selecciona el contorno más probable de ser la línea principal"""
-    if not contornos:
-        return None
-    
-    mejor_contorno = None
-    mejor_puntuacion = -1
-    
-    centro_imagen = ancho_imagen // 2
-    
-    for contorno in contornos:
-        area = cv2.contourArea(contorno)
-        
-        # Filtrar contornos muy pequeños o muy grandes
-        if area < 150 or area > 5000:
-            continue
-        
-        # Calcular rectángulo delimitador
-        x, y, w, h = cv2.boundingRect(contorno)
-        
-        # Calcular relación de aspecto (líneas tienden a ser más largas que anchas)
-        aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 0
-        
-        # Calcular centroide
-        M = cv2.moments(contorno)
-        if M["m00"] != 0:
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-            
-            # Calcular distancia al centro de la imagen
-            dist_centro = abs(cx - centro_imagen) / centro_imagen
-            
-            # Puntuación basada en múltiples factores
-            puntuacion = 0
-            
-            # Factor 1: Área (preferir tamaños medios)
-            if 200 <= area <= 2000:
-                puntuacion += 30
-            elif 150 <= area <= 3000:
-                puntuacion += 20
-            
-            # Factor 2: Relación de aspecto (líneas son alargadas)
-            if aspect_ratio > 2:
-                puntuacion += 25
-            elif aspect_ratio > 1.5:
-                puntuacion += 15
-            
-            # Factor 3: Proximidad al centro (líneas suelen estar centradas)
-            if dist_centro < 0.3:
-                puntuacion += 25
-            elif dist_centro < 0.5:
-                puntuacion += 15
-            
-            # Factor 4: Posición en Y (líneas suelen estar en la parte inferior del ROI)
-            if y > h * 0.3:  # En la mitad inferior del ROI
-                puntuacion += 20
-            
-            if puntuacion > mejor_puntuacion:
-                mejor_puntuacion = puntuacion
-                mejor_contorno = contorno
-    
-    return mejor_contorno
-
-def procesar_frame_corregido(frame):
-    """Procesa frame con corrección de rotación y filtrado avanzado"""
+def procesar_frame_completo(frame):
+    """Procesa frame para mostrar detección exacta como en la imagen"""
     global ultima_deteccion
     
     try:
-        # CORRECCIÓN 1: Rotar imagen 180 grados
-        frame_rotado = cv2.rotate(frame, cv2.ROTATE_180)
-        
         # Convertir a escala de grises
-        if len(frame_rotado.shape) == 3:
-            gris = cv2.cvtColor(frame_rotado, cv2.COLOR_RGB2GRAY)
+        if len(frame.shape) == 3:
+            gris = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         else:
-            gris = frame_rotado.copy()
+            gris = frame.copy()
         
         h, w = gris.shape
         
@@ -327,14 +233,8 @@ def procesar_frame_corregido(frame):
         roi_y = h - altura_roi
         roi = gris[roi_y:h, 0:w]
         
-        # CORRECCIÓN 2: Aplicar filtro Gaussiano antes de binarizar
-        roi_suavizada = cv2.GaussianBlur(roi, (5, 5), 0)
-        
-        # Binarización mejorada
-        _, roi_binaria = cv2.threshold(roi_suavizada, umbral, 255, cv2.THRESH_BINARY_INV)
-        
-        # CORRECCIÓN 3: Aplicar filtros morfológicos para eliminar ruido
-        roi_filtrada = aplicar_filtros_morfologicos(roi_binaria)
+        # Binarización - línea negra sobre fondo claro
+        _, roi_binaria = cv2.threshold(roi, umbral, 255, cv2.THRESH_BINARY_INV)
         
         # Frame de visualización original
         frame_original = cv2.cvtColor(gris, cv2.COLOR_GRAY2RGB)
@@ -348,48 +248,40 @@ def procesar_frame_corregido(frame):
         cv2.putText(frame_original, f"T:{umbral}", (10, 25), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
-        # CORRECCIÓN 4: Detección inteligente de línea principal
+        # Detectar centroide de la línea
         linea_detectada = False
         centro_x, centro_y = 0, 0
         posicion_linea = 0.0
-        area_contorno = 0
-        confianza = 0.0
+        pixels_detectados = 0
         
         # Encontrar contornos
-        contornos, _ = cv2.findContours(roi_filtrada, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contornos, _ = cv2.findContours(roi_binaria, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Seleccionar el mejor contorno (línea principal)
-        mejor_contorno = seleccionar_contorno_linea_principal(contornos, w)
-        
-        if mejor_contorno is not None:
-            area_contorno = cv2.contourArea(mejor_contorno)
+        if contornos:
+            # Encontrar el contorno más grande
+            contorno_mayor = max(contornos, key=cv2.contourArea)
+            area = cv2.contourArea(contorno_mayor)
             
-            # Calcular centroide
-            M = cv2.moments(mejor_contorno)
-            if M["m00"] != 0:
-                centro_x = int(M["m10"] / M["m00"])
-                centro_y = int(M["m01"] / M["m00"]) + roi_y
-                
-                # Calcular posición normalizada (-1 a 1)
-                posicion_linea = (centro_x - w/2) / (w/2)
-                linea_detectada = True
-                
-                # Calcular confianza basada en área y posición
-                confianza = min(1.0, area_contorno / 1000.0)
-                
-                # Dibujar el contorno seleccionado en azul (para debug)
-                cv2.drawContours(frame_original, [mejor_contorno], -1, (0, 0, 255), 2, offset=(0, roi_y))
-                
-                # Dibujar centroide en rojo
-                cv2.circle(frame_original, (centro_x, centro_y), 8, (255, 0, 0), -1)
-                
-                # Mostrar información del centroide
-                cv2.putText(frame_original, f"Centro: ({centro_x},{centro_y})", 
-                           (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                cv2.putText(frame_original, f"Pos: {posicion_linea:.3f}", 
-                           (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                cv2.putText(frame_original, f"Area: {int(area_contorno)}", 
-                           (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            if area > 200:  # Área mínima para considerar una línea válida
+                # Calcular momentos para encontrar centroide
+                M = cv2.moments(contorno_mayor)
+                if M["m00"] != 0:
+                    centro_x = int(M["m10"] / M["m00"])
+                    centro_y = int(M["m01"] / M["m00"]) + roi_y
+                    
+                    # Calcular posición normalizada (-1 a 1)
+                    posicion_linea = (centro_x - w/2) / (w/2)
+                    linea_detectada = True
+                    pixels_detectados = int(area)
+                    
+                    # Dibujar centroide en rojo
+                    cv2.circle(frame_original, (centro_x, centro_y), 8, (255, 0, 0), -1)
+                    
+                    # Mostrar información del centroide
+                    cv2.putText(frame_original, f"Centro: ({centro_x},{centro_y})", 
+                               (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+                    cv2.putText(frame_original, f"Pos: {posicion_linea:.3f}", 
+                               (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
         
         # Actualizar detección global
         ultima_deteccion.update({
@@ -397,20 +289,18 @@ def procesar_frame_corregido(frame):
             'posicion_linea': posicion_linea,
             'centro_x': centro_x,
             'centro_y': centro_y,
-            'pixels_detectados': int(area_contorno),
-            'area_contorno': area_contorno,
-            'confianza': confianza
+            'pixels_detectados': pixels_detectados
         })
         
         # Crear frame binario completo para visualización
         frame_binario_completo = np.zeros_like(gris)
-        frame_binario_completo[roi_y:h, 0:w] = roi_filtrada  # Usar imagen filtrada
+        frame_binario_completo[roi_y:h, 0:w] = roi_binaria
         frame_binario_rgb = cv2.cvtColor(frame_binario_completo, cv2.COLOR_GRAY2RGB)
         
         # Actualizar etiqueta de estado de línea
         if linea_label:
             if linea_detectada:
-                texto_linea = f"Línea: ✓ Detectada | Posición: {posicion_linea:.3f} | Área: {int(area_contorno)} | Conf: {confianza:.2f}"
+                texto_linea = f"Línea: ✓ Detectada | Posición: {posicion_linea:.3f}"
             else:
                 texto_linea = "Línea: ✗ No detectada | Posición: N/A"
             linea_label.config(text=texto_linea)
@@ -425,7 +315,7 @@ def procesar_frame_corregido(frame):
 
 def hilo_stream_video():
     """Hilo para stream de video optimizado"""
-    print("[STREAM] Iniciando stream de video corregido...")
+    print("[STREAM] Iniciando stream de video...")
     
     errores_consecutivos = 0
     max_errores = 5
@@ -458,8 +348,8 @@ def hilo_stream_video():
                             img = Image.open(io.BytesIO(jpg))
                             frame_np = np.array(img)
                             
-                            # Procesar con correcciones (rotación + filtrado)
-                            frame_original, frame_binario = procesar_frame_corregido(frame_np)
+                            # Procesar para obtener ambos frames
+                            frame_original, frame_binario = procesar_frame_completo(frame_np)
                             
                             # Mostrar en interfaz
                             mostrar_frames_duales(frame_original, frame_binario)
@@ -586,12 +476,12 @@ def callback_slider_parametros(param_name):
     return callback
 
 def crear_interfaz_completa():
-    """Crea la interfaz completa con correcciones implementadas"""
+    """Crea la interfaz completa replicando la imagen mostrada"""
     global root, estado_label, modo_label, linea_label
     global video_original_label, video_binario_label, auto_button, control_buttons, sliders
     
     root = tk.Tk()
-    root.title("🤖 Robot Seguidor de Línea - ESP32-CAM (Corregido)")
+    root.title("🤖 Robot Seguidor de Línea - ESP32-CAM")
     root.geometry("1350x900")
     root.configure(bg='#f0f0f0')
     root.resizable(True, True)
@@ -618,14 +508,9 @@ def crear_interfaz_completa():
     titulo_frame = ttk.Frame(main_frame)
     titulo_frame.pack(fill="x", pady=(0, 15))
     
-    titulo_label = ttk.Label(titulo_frame, text="🤖 Robot Seguidor de Línea ESP32-CAM (Versión Corregida)", 
+    titulo_label = ttk.Label(titulo_frame, text="🤖 Robot Seguidor de Línea ESP32-CAM", 
                             style="Title.TLabel")
     titulo_label.pack()
-    
-    # Subtítulo con correcciones
-    subtitulo_label = ttk.Label(titulo_frame, text="✅ Rotación 180° corregida | ✅ Filtrado anti-ruido | ✅ Detección inteligente", 
-                               font=("Arial", 10), background='#f0f0f0', foreground='#28a745')
-    subtitulo_label.pack(pady=(5, 0))
     
     # ==========================================
     # ESTADO DEL SISTEMA
@@ -653,27 +538,27 @@ def crear_interfaz_completa():
     linea_label.pack(side="right")
     
     # ==========================================
-    # VISUALIZACIÓN DUAL DE CÁMARA CORREGIDA
+    # VISUALIZACIÓN DUAL DE CÁMARA
     # ==========================================
     video_container = ttk.Frame(main_frame)
     video_container.pack(fill="both", expand=True, pady=(0, 15))
     
-    # Frame izquierdo - Cámara original (ROTADA)
-    video_original_frame = ttk.LabelFrame(video_container, text="📹 Cámara con Detección (Rotación Corregida)", padding="10")
+    # Frame izquierdo - Cámara original
+    video_original_frame = ttk.LabelFrame(video_container, text="📹 Cámara con Detección", padding="10")
     video_original_frame.pack(side="left", fill="both", expand=True, padx=(0, 8))
     
     video_original_label = tk.Label(video_original_frame, bg="black", 
-                                   text="🔄 Conectando a ESP32-CAM...\n✅ Aplicando rotación 180°\n🎯 Activando detección inteligente", 
-                                   fg="white", font=("Arial", 11), justify="center")
+                                   text="Conectando a ESP32-CAM...\nEsperando stream de video...", 
+                                   fg="white", font=("Arial", 12), justify="center")
     video_original_label.pack(fill="both", expand=True)
     
-    # Frame derecho - Imagen binarizada (FILTRADA)
-    video_binario_frame = ttk.LabelFrame(video_container, text="🔍 Imagen Binarizada (Filtros Anti-Ruido)", padding="10")
+    # Frame derecho - Imagen binarizada
+    video_binario_frame = ttk.LabelFrame(video_container, text="🔍 Imagen Binarizada", padding="10")
     video_binario_frame.pack(side="right", fill="both", expand=True, padx=(8, 0))
     
     video_binario_label = tk.Label(video_binario_frame, bg="black", 
-                                  text="🧹 Filtros morfológicos activos\n🎯 Eliminación de objetos no deseados\n✨ Detección de línea principal", 
-                                  fg="white", font=("Arial", 11), justify="center")
+                                  text="Procesamiento de imagen...\nUmbralización en tiempo real", 
+                                  fg="white", font=("Arial", 12), justify="center")
     video_binario_label.pack(fill="both", expand=True)
     
     # ==========================================
@@ -696,16 +581,16 @@ def crear_interfaz_completa():
     # ==========================================
     # AJUSTE DE PARÁMETROS CON SLIDERS
     # ==========================================
-    parametros_frame = ttk.LabelFrame(main_frame, text="🔧 Ajuste de Parámetros de Visión (Optimizados)", padding="15")
+    parametros_frame = ttk.LabelFrame(main_frame, text="🔧 Ajuste de Parámetros de Visión", padding="15")
     parametros_frame.pack(fill="x", pady=(0, 15))
     
-    # Configuración de parámetros optimizada
+    # Configuración de parámetros
     params_config = {
-        'umbral_binario': {'label': 'Umbral de Binarización (0-255)', 'min': 40, 'max': 150, 'step': 1},
-        'altura_roi': {'label': 'Altura de ROI (píxeles)', 'min': 40, 'max': 100, 'step': 5},
-        'zona_muerta_centro': {'label': 'Zona Muerta Central (0.0-0.3)', 'min': 0.02, 'max': 0.2, 'step': 0.01},
-        'velocidad_base': {'label': 'Velocidad Base (100-200)', 'min': 100, 'max': 200, 'step': 5},
-        'velocidad_giro': {'label': 'Velocidad de Giro (80-160)', 'min': 80, 'max': 160, 'step': 5}
+        'umbral_binario': {'label': 'Umbral de Binarización (0-255)', 'min': 0, 'max': 255, 'step': 1},
+        'altura_roi': {'label': 'Altura de ROI (píxeles)', 'min': 30, 'max': 120, 'step': 5},
+        'zona_muerta_centro': {'label': 'Zona Muerta Central (0.0-0.3)', 'min': 0.02, 'max': 0.3, 'step': 0.01},
+        'velocidad_base': {'label': 'Velocidad Base (100-255)', 'min': 100, 'max': 255, 'step': 5},
+        'velocidad_giro': {'label': 'Velocidad de Giro (80-200)', 'min': 80, 'max': 200, 'step': 5}
     }
     
     # Organizar en dos columnas
@@ -753,7 +638,7 @@ def crear_interfaz_completa():
         sliders[param_name] = {'slider': slider, 'valor_label': valor_label}
     
     # Botón de reset
-    reset_button = ttk.Button(parametros_frame, text="🔄 Resetear Valores Optimizados", 
+    reset_button = ttk.Button(parametros_frame, text="🔄 Resetear Valores por Defecto", 
                              command=resetear_parametros, style="Orange.TButton")
     reset_button.pack(pady=(15, 0))
     
@@ -813,7 +698,7 @@ def crear_interfaz_completa():
     root.focus_set()
     
     # Información de IP
-    ip_info = ttk.Label(main_frame, text=f"🌐 ESP32-CAM: {ESP32_CAM_IP} | 🔄 Rotación: Corregida | 🧹 Filtros: Activos", 
+    ip_info = ttk.Label(main_frame, text=f"🌐 Conectado a ESP32-CAM: {ESP32_CAM_IP}", 
                        font=("Arial", 10), background='#f0f0f0')
     ip_info.pack(pady=(10, 0))
     
@@ -838,34 +723,23 @@ def crear_interfaz_completa():
     # Estado inicial
     actualizar_estado_labels("Conectando...", "Manual")
     
-    print("=" * 80)
-    print("🤖 ROBOT SEGUIDOR DE LÍNEA - VERSIÓN CORREGIDA INICIADA")
-    print("=" * 80)
+    print("=" * 70)
+    print("🤖 ROBOT SEGUIDOR DE LÍNEA - INTERFAZ COMPLETA INICIADA")
+    print("=" * 70)
     print(f"📡 Conectando a ESP32-CAM: {ESP32_CAM_IP}")
-    print("🔄 CORRECCIÓN 1: Rotación de imagen 180° aplicada")
-    print("🧹 CORRECCIÓN 2: Filtros morfológicos anti-ruido activos")
-    print("🎯 CORRECCIÓN 3: Detección inteligente de línea principal")
     print("📹 Stream dual: Original + Binarizada")
-    print("🎛️ Sliders de parámetros optimizados")
+    print("🎛️ Sliders de parámetros en tiempo real")
+    print("🎮 Control manual y automático")
     print("⌨️ Controles de teclado habilitados")
-    print("=" * 80)
+    print("=" * 70)
     
     root.mainloop()
 
 def resetear_parametros():
-    """Resetea todos los parámetros a valores optimizados"""
+    """Resetea todos los parámetros a valores por defecto"""
     global parametros_actuales
     
-    # Valores optimizados para evitar problemas
-    parametros_optimizados = {
-        'umbral_binario': 75,        # Umbral medio-bajo
-        'altura_roi': 50,            # ROI más pequeña
-        'zona_muerta_centro': 0.10,  # Zona muerta mayor para estabilidad
-        'velocidad_base': 140,       # Velocidad reducida
-        'velocidad_giro': 100,       # Giro más lento
-    }
-    
-    parametros_actuales = parametros_optimizados.copy()
+    parametros_actuales = PARAMETROS_DEFAULT.copy()
     
     # Actualizar todos los sliders
     for param_name, slider_info in sliders.items():
@@ -880,39 +754,29 @@ def resetear_parametros():
     # Enviar al ESP32
     robot.enviar_parametros(parametros_actuales)
     
-    print("[RESET] Parámetros reseteados a valores optimizados anti-ruido")
-    messagebox.showinfo("Parámetros Optimizados", 
-                       "Parámetros reseteados a valores optimizados:\n"
-                       "• Umbral: 75 (medio-bajo)\n"
-                       "• ROI: 50px (más pequeña)\n"
-                       "• Zona muerta: 0.10 (mayor estabilidad)\n"
-                       "• Velocidades reducidas para mayor control")
+    print("[RESET] Parámetros reseteados a valores por defecto")
+    messagebox.showinfo("Parámetros Reseteados", 
+                       "Todos los parámetros han sido reseteados a sus valores por defecto.")
 
 if __name__ == "__main__":
-    print("=" * 90)
-    print("🤖 ROBOT SEGUIDOR DE LÍNEA ESP32-CAM - VERSIÓN CORREGIDA")
-    print("=" * 90)
+    print("=" * 80)
+    print("🤖 ROBOT SEGUIDOR DE LÍNEA ESP32-CAM - INTERFAZ COMPLETA")
+    print("=" * 80)
     print(f"📡 IP ESP32-CAM configurada: {ESP32_CAM_IP}")
     print("⚠️  IMPORTANTE: Verifica que la IP sea correcta antes de continuar")
     print("📝 Si la IP es incorrecta, cambia ESP32_CAM_IP en la línea 25")
     print()
-    print("🔧 CORRECCIONES IMPLEMENTADAS:")
-    print("• 🔄 Rotación de imagen 180° para corregir orientación")
-    print("• 🧹 Filtros morfológicos para eliminar ruido y objetos no deseados")
-    print("• 🎯 Detección inteligente que selecciona solo la línea principal")
-    print("• 📏 Filtrado por área, forma y posición para mayor precisión")
-    print("• ⚡ Suavizado Gaussiano antes de binarización")
-    print("• 🎛️ Parámetros optimizados para evitar falsas detecciones")
-    print()
-    print("✨ CARACTERÍSTICAS MEJORADAS:")
-    print("• 📹 Visualización dual con filtros aplicados")
-    print("• 🎯 Centroide más preciso y estable")
-    print("• 🛡️ Resistente a objetos blancos en el fondo")
-    print("• 📊 Información detallada de confianza y área")
+    print("✨ CARACTERÍSTICAS DE LA INTERFAZ:")
+    print("• 📹 Visualización dual (Original + Binarizada)")
+    print("• 🎯 Detección de centroide en tiempo real")
+    print("• 🎛️ 5 sliders para ajuste de parámetros")
     print("• 🎮 Control manual y automático")
+    print("• ⌨️ Controles de teclado (W-A-S-D-Q-E-X)")
+    print("• 🔄 Botón de reset de parámetros")
+    print("• 📊 Estado detallado del sistema")
     print()
-    print("🚀 Iniciando interfaz corregida...")
-    print("=" * 90)
+    print("🚀 Iniciando interfaz completa...")
+    print("=" * 80)
     
     try:
         crear_interfaz_completa()
@@ -923,3 +787,4 @@ if __name__ == "__main__":
         messagebox.showerror("Error Crítico", f"Error en la aplicación: {e}")
     finally:
         print("👋 Aplicación terminada correctamente")
+        
